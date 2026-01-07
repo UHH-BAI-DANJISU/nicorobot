@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv
+
+# Data (IMPORTANT)
+data/
+
+# Experiment outputs
+*.csv
+*.pt
+*.pth
+*.log
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
