@@ -30,21 +30,26 @@ class NicoDataset(Dataset):
         self.ee_cols = [c for c in self.csv.columns if c.startswith("ee")]
 
     def __len__(self):
-        return len(self.csv)
+        return len(self.csv) # 데이터 샘플 수 반환
 
     def _load_img(self, rel_path):
         img = Image.open(os.path.join(self.root_dir, rel_path)).convert("RGB")
         return self.transform(img)
 
+        # 상대 경로 받아서 실제 파일 열고 RGB로 강제 변환, resize + tensor 변환 전부 포함
+
     def __getitem__(self, idx):
         row = self.csv.iloc[idx]
 
+        # obsercation 구성, binocular vision 구현
         left = self._load_img(row["left_image_path"])
         right = self._load_img(row["right_image_path"])
         obs = torch.cat([left, right], dim=0)  # [6,64,64]
 
+        # action 구성
         joint = torch.tensor(row[self.joint_cols].values, dtype=torch.float32)
         ee = torch.tensor(row[self.ee_cols].values, dtype=torch.float32)
-        action = torch.cat([joint, ee], dim=0)
+        action = torch.cat([joint, ee], dim=0) # 관절 각도와 Cartesian pose를 하나의 벡터로 결합
+        # a = [a_J, a_C]
 
-        return obs, action
+        return obs, action # 모델이 받는 최종 입력
