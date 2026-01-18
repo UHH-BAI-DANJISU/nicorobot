@@ -5,9 +5,9 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import os
 import numpy as np
-import time # [추가] 시간 측정을 위해
+import time
 
-# 경로 문제 방지
+# 경로 문제 방지 및 모듈 임포트
 try:
     from dataset import NICORobotDataset, get_normalization_stats, TRAIN_DIR, TEST_DIR
     from energy_model import EnergyModel
@@ -36,7 +36,7 @@ def generate_negatives(pos_actions, num_negatives, action_dim, device):
     
     neg_actions[:, :num_random, :] = random_noise
     
-    # [4] 클리핑
+    # [4] 클리핑 (-1 ~ 1)
     neg_actions = neg_actions.view(-1, action_dim)
     return torch.clamp(neg_actions, -1.0, 1.0)
 
@@ -50,7 +50,9 @@ def main():
     action_dim = 14
     num_negatives = 64
     batch_size = 32
-    epochs = 20        
+    
+    # [중요] 성능 향상을 위해 에폭 100으로 설정
+    epochs = 100      
     lr = 1e-4
     
     checkpoint_path = "latest_checkpoint.pth"
@@ -63,21 +65,24 @@ def main():
         return
 
     stats = get_normalization_stats(csv_path)
+    # Augmentation이 적용된 데이터셋 사용 (is_train=True)
     train_ds = NICORobotDataset(TRAIN_DIR, stats, is_train=True)
     test_ds = NICORobotDataset(TEST_DIR, stats, is_train=False)
 
-    # [Tip] CPU 사용 시 num_workers가 너무 크면 오히려 느릴 수 있음. 0이나 2 추천.
+    # CPU에서는 num_workers를 0 또는 2 정도로 작게 설정
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=2, drop_last=True)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=2, drop_last=True)
 
-    # 2. 모델 초기화
+    # 2. 모델 및 옵티마이저 초기화
     model = EnergyModel(action_dim=action_dim, stats=stats, device=device).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
     
     writer = SummaryWriter('runs/implicit_experiment_best_tracking')
 
-    # 3. Resume Logic
+    # ---------------------------------------------------------
+    # [핵심] Resume Logic (중단된 곳부터 이어하기)
+    # ---------------------------------------------------------
     start_epoch = 0
     global_step = 0
     best_val_loss = float('inf')
@@ -88,11 +93,16 @@ def main():
             checkpoint = torch.load(checkpoint_path, map_location=device)
             model.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            # 저장된 에폭 다음부터 시작
             start_epoch = checkpoint['epoch'] + 1
             global_step = checkpoint['global_step']
+            
             if 'best_val_loss' in checkpoint:
                 best_val_loss = checkpoint['best_val_loss']
-            print(f" -> Resuming from Epoch {start_epoch+1} (Current Best Val Loss: {best_val_loss:.4f})")
+                
+            print(f" -> 🔄 Resuming from Epoch {start_epoch+1}")
+            print(f" -> Current Best Val Loss: {best_val_loss:.4f}")
         except Exception as e:
             print(f"[Warning] Failed to load checkpoint: {e}")
             print(" -> Starting from scratch.")
@@ -101,9 +111,9 @@ def main():
 
     print(f"\n[Info] Start Training (Epochs: {start_epoch+1} ~ {epochs})...")
     
-    # 총 배치 개수 미리 계산
     total_batches = len(train_loader)
 
+    # 3. 학습 루프 시작
     for epoch in range(start_epoch, epochs):
         model.train()
         train_loss_sum = 0.0
@@ -122,13 +132,13 @@ def main():
             images_expanded = images.unsqueeze(1).repeat(1, num_negatives, 1, 1, 1).view(-1, 6, 64, 64)
             neg_energy = model(images_expanded, neg_actions).view(batch_size, num_negatives)
             
-            # (C) Loss
+            # (C) Loss Calculation (InfoNCE)
             logits = torch.cat([-pos_energy, -neg_energy], dim=1)
             labels = torch.zeros(batch_size, dtype=torch.long, device=device)
             
             loss = criterion(logits, labels)
             
-            # (D) Backprop
+            # (D) Backpropagation
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -137,14 +147,13 @@ def main():
             writer.add_scalar('Loss/train_step', loss.item(), global_step)
             global_step += 1
             
-            # [추가됨] 10 배치마다 로그 출력 (살아있음을 알림)
+            # 로그 출력 (10 배치마다)
             if (i + 1) % 10 == 0:
                 print(f"\rEpoch [{epoch+1}/{epochs}] Step [{i+1}/{total_batches}] Loss: {loss.item():.4f}", end="")
 
         avg_train_loss = train_loss_sum / len(train_loader)
         writer.add_scalar('Loss/train_epoch', avg_train_loss, epoch)
         
-        # 한 에폭 걸린 시간
         epoch_duration = time.time() - start_time
         print(f"\nTime per Epoch: {epoch_duration:.2f} sec")
 
@@ -183,7 +192,9 @@ def main():
         else:
             print("") 
 
-        # Checkpoint 저장
+        # ---------------------------------------------------------
+        # [핵심] 매 에폭마다 상태 저장 (끊겨도 여기서부터 시작)
+        # ---------------------------------------------------------
         torch.save({
             'epoch': epoch,
             'model_state_dict': model.state_dict(),

@@ -109,3 +109,37 @@ class EnergyModel(nn.Module):
         total_energy = energy_nn + (10.0 * kinematic_error)
         
         return total_energy
+    
+    def compute_vision_feature(self, images):
+        """
+        이미지 특징(Vector)만 한 번 추출합니다.
+        images: [1, 6, 64, 64] -> returns: [1, 512]
+        """
+        return self.backbone(images)
+
+    def score_with_feature(self, img_embed, actions):
+        """
+        미리 뽑아둔 이미지 특징(img_embed)과 Action을 결합해 에너지를 계산합니다.
+        ResNet을 타지 않으므로 연산이 매우 가볍습니다.
+        
+        img_embed: [K, 512] (이미 확장된 상태여야 함)
+        actions:   [K, 14]
+        """
+        # (1) Action Encoding
+        act_embed = self.action_encoder(actions)
+        
+        # (2) Combine & Energy Head
+        combined = torch.cat([img_embed, act_embed], dim=1)
+        energy_nn = self.head(combined)
+        
+        # (3) Kinematic Inconsistency (기존 forward 로직과 동일)
+        raw_actions = self.denormalize(actions)
+        joints_rad = raw_actions[:, :8]
+        target_pos_m = raw_actions[:, 8:11]
+        
+        pred_pos_m = self.dfk(joints_rad)
+        kinematic_error = torch.norm(pred_pos_m - target_pos_m, dim=1, keepdim=True)
+        
+        total_energy = energy_nn + (10.0 * kinematic_error)
+        
+        return total_energy

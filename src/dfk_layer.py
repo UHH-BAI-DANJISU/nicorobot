@@ -1,142 +1,96 @@
 import torch
 import torch.nn as nn
+import pytorch_kinematics as pk
+import os
 
 class DifferentiableFK(nn.Module):
-    def __init__(self, device='cuda'):
+    def __init__(self, device='cpu', urdf_path='complete.urdf', end_link_name='left_palm:11'):
         super().__init__()
         self.device = device
         
-        # -------------------------------------------------------------------
-        # NICO Robot Physical Parameters (from complete.urdf)
-        # -------------------------------------------------------------------
-        # 1. Upper Arm (어깨~팔꿈치): l_elbow_y의 origin 벡터 크기
-        # sqrt((-0.034)^2 + (0.023)^2 + (-0.17)^2) ≈ 0.1748m
-        self.L1 = 0.1748 
-        
-        # 2. Forearm (팔꿈치~손목): l_wrist_z의 origin 벡터 크기
-        # sqrt(0^2 + (-0.01)^2 + (-0.125)^2) ≈ 0.1259m
-        self.L2 = 0.1259
-        
-        # (참고) 손목에서 손끝까지의 오프셋이 필요하다면 추가 가능 (보통 5~10cm)
-        self.L_HAND = 0.05 
+        # 1. URDF 파일 경로 탐색 (현재 폴더 혹은 상위 폴더)
+        if not os.path.exists(urdf_path):
+            # ../complete.urdf 시도
+            parent_path = os.path.join(os.path.dirname(__file__), '..', urdf_path)
+            if os.path.exists(parent_path):
+                urdf_path = parent_path
+            else:
+                # 못 찾으면 에러 발생 (또는 다운로드 로직 등)
+                raise FileNotFoundError(f"[DFK Error] Cannot find URDF file at: {urdf_path}")
 
-    def compute_transformation_matrix(self, theta, d, a, alpha):
-        """
-        Standard Denavit-Hartenberg (DH) Matrix Calculation
-        theta: z축 회전 (Joint Angle)
-        d: z축 이동 (Link Offset)
-        a: x축 이동 (Link Length)
-        alpha: x축 회전 (Link Twist)
-        """
-        B = theta.shape[0]
+        print(f"[Info] Loading URDF from: {urdf_path}")
+
+        # 2. Build Serial Chain (Base -> End Effector)
+        # NICO 로봇: 'torso:11' (Base) -> 'left_palm:11' (End Effector)
+        # URDF 데이터를 읽어서 체인 생성
+        with open(urdf_path, 'rb') as f:
+            urdf_data = f.read()
         
-        # 삼각함수 계산
-        ct = torch.cos(theta)
-        st = torch.sin(theta)
-        ca = torch.cos(torch.tensor(alpha, device=self.device))
-        sa = torch.sin(torch.tensor(alpha, device=self.device))
+        self.chain = pk.build_serial_chain_from_urdf(
+            urdf_data, 
+            end_link_name=end_link_name
+        )
+        self.chain = self.chain.to(device=device)
         
-        # 4x4 변환 행렬 배치 생성
-        mat = torch.eye(4, device=self.device).unsqueeze(0).repeat(B, 1, 1)
+        # 3. Joint Mapping 준비
+        # dataset.py의 입력 관절 순서 (왼팔 6 자유도)
+        self.input_joint_names = [
+            'l_shoulder_z', 'l_shoulder_y', 'l_arm_x', 
+            'l_elbow_y', 'l_wrist_z', 'l_wrist_x'
+        ]
         
-        # 1행
-        mat[:, 0, 0] = ct
-        mat[:, 0, 1] = -st * ca
-        mat[:, 0, 2] = st * sa
-        mat[:, 0, 3] = a * ct
+        # 체인(URDF)에서 실제 구동되는 관절 이름 목록 가져오기
+        self.chain_joint_names = self.chain.get_joint_parameter_names()
         
-        # 2행
-        mat[:, 1, 0] = st
-        mat[:, 1, 1] = ct * ca
-        mat[:, 1, 2] = -ct * sa
-        mat[:, 1, 3] = a * st
-        
-        # 3행
-        mat[:, 2, 1] = sa
-        mat[:, 2, 2] = ca
-        mat[:, 2, 3] = d
-        
-        return mat
+        # 입력 벡터(dataset 순서)를 체인(URDF 순서)에 맞게 재정렬할 인덱스 생성
+        self.perm_indices = []
+        for name in self.chain_joint_names:
+            if name in self.input_joint_names:
+                idx = self.input_joint_names.index(name)
+                self.perm_indices.append(idx)
+            else:
+                print(f"[Warning] Joint '{name}' in URDF chain is not in input list. (Will be treated as 0?)")
 
     def forward(self, joint_angles):
         """
-        Forward Kinematics
-        input: joint_angles [Batch, 8] (NICO 왼쪽 팔 기준 6개 + 헤드 2개)
-               **주의: 입력값은 반드시 라디안(Radian) 단위여야 함!**
-               (-1~1로 정규화된 값이 들어온다면 Denormalize 해서 넣어야 함)
-        output: predicted_ee_pos [Batch, 3] (x, y, z)
+        Input: joint_angles [Batch, 8] (또는 14) 
+               - dataset.py 기준 0~5번 인덱스가 왼팔 관절
+        Output: predicted_ee_pos [Batch, 3] (x, y, z)
         """
-        # 입력 데이터가 GPU에 있는지 확인
+        # 입력 데이터 Device 이동
         if joint_angles.device != torch.device(self.device):
             joint_angles = joint_angles.to(self.device)
+            
+        # 1. 왼팔 관절(6개)만 추출
+        # dataset.py 순서: [l_shoulder_z, l_shoulder_y, l_arm_x, l_elbow_y, l_wrist_z, l_wrist_x, ...]
+        arm_joints = joint_angles[:, :6] 
 
-        # NICO Left Arm Joints: 
-        # 0: l_shoulder_z
-        # 1: l_shoulder_y
-        # 2: l_arm_x
-        # 3: l_elbow_y
-        # 4: l_wrist_z
-        # 5: l_wrist_x
-        
-        q = joint_angles
-        B = q.shape[0]
+        # 2. URDF 체인이 기대하는 순서로 재정렬
+        # (만약 URDF와 dataset의 관절 순서가 같다면 그대로 유지됨)
+        if len(self.perm_indices) > 0:
+            ordered_joints = arm_joints[:, self.perm_indices]
+        else:
+            ordered_joints = arm_joints
 
-        # -----------------------------------------------------
-        # Kinematic Chain (Simplified for NICO)
-        # NICO는 3D 오프셋이 복잡하지만, 학습을 위해 주요 링크 길이(L1, L2)를 
-        # 반영한 Standard DH Chain으로 근사화함.
-        # -----------------------------------------------------
+        # 3. Forward Kinematics 계산
+        # pytorch_kinematics의 forward_kinematics는 Transform3d 객체를 반환
+        tg = self.chain.forward_kinematics(ordered_joints)
         
-        # 1. Base -> Shoulder Z (Yaw)
-        T0 = self.compute_transformation_matrix(q[:, 0], d=0.0, a=0.0, alpha=1.57)
-        
-        # 2. Shoulder Z -> Shoulder Y (Pitch)
-        # 여기서 L1(Upper Arm) 길이만큼 이동한다고 가정
-        T1 = self.compute_transformation_matrix(q[:, 1], d=0.0, a=self.L1, alpha=0.0)
-        
-        # 3. Shoulder Y -> Arm X (Roll)
-        # (단순화를 위해 Pitch와 Roll이 같은 위치에 있다고 가정하거나 작은 오프셋 무시)
-        T2 = self.compute_transformation_matrix(q[:, 2], d=0.0, a=0.0, alpha=-1.57)
-        
-        # 4. Arm X -> Elbow Y (Pitch)
-        # 여기서 L2(Forearm) 길이만큼 이동
-        T3 = self.compute_transformation_matrix(q[:, 3], d=0.0, a=self.L2, alpha=0.0)
-        
-        # 5. Elbow -> Wrist Z (Yaw)
-        T4 = self.compute_transformation_matrix(q[:, 4], d=0.0, a=0.0, alpha=1.57)
-
-        # 6. Wrist Z -> Wrist X (Roll) -> Hand Tip
-        T5 = self.compute_transformation_matrix(q[:, 5], d=0.0, a=self.L_HAND, alpha=0.0)
-
-        # -----------------------------------------------------
-        # 행렬 곱셈 (Chain Multiplication)
-        # Base에서 시작해 손끝까지 변환 행렬을 누적
-        # -----------------------------------------------------
-        T_final = T0.matmul(T1).matmul(T2).matmul(T3).matmul(T4).matmul(T5)
-        
-        # 최종 위치 추출 (Translation Vector)
-        # [Batch, 0:3, 3] -> x, y, z 좌표
-        predicted_ee_pos = T_final[:, :3, 3]
+        # 4. 위치(Translation) 추출
+        # get_matrix(): [Batch, 4, 4] -> (x, y, z) 추출
+        m = tg.get_matrix()
+        predicted_ee_pos = m[:, :3, 3]
         
         return predicted_ee_pos
 
-# --- 간단 테스트 코드 ---
 if __name__ == "__main__":
-    # GPU 사용 가능하면 GPU로, 아니면 CPU로
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    dfk = DifferentiableFK(device=device)
-    
-    # 더미 데이터 (배치 크기 2, 관절 8개)
-    # 0도(0.0)일 때 팔을 쭉 뻗은 상태라고 가정
-    dummy_joints = torch.zeros(2, 8).to(device)
-    
-    # Forward Pass
-    pred_pos = dfk(dummy_joints)
-    
-    print(f"Device: {device}")
-    print(f"L1(Upper): {dfk.L1}m, L2(Forearm): {dfk.L2}m")
-    print("Joint Angles (Rad):", dummy_joints[0, :6])
-    print("Predicted Hand Pos (x, y, z):", pred_pos[0])
-    
-    # 미분 가능 여부 확인 (True여야 학습 가능)
-    print("Requires Grad?", pred_pos.requires_grad)
+    # 테스트 코드
+    try:
+        dfk = DifferentiableFK(device='cpu', urdf_path='complete.urdf')
+        dummy_input = torch.zeros(2, 8) # Batch 2
+        pos = dfk(dummy_input)
+        print("Output shape:", pos.shape)
+        print("Position (Left Palm):", pos)
+    except Exception as e:
+        print(f"Test Failed: {e}")
+        print("Make sure 'complete.urdf' is in the current or parent directory.")

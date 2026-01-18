@@ -5,3 +5,4 @@ pandas
 Pillow
 tqdm
 scikit-learn
+pytorch-kinematics

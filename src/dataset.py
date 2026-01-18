@@ -114,12 +114,19 @@ class NICORobotDataset(Dataset):
         # -------------------------------------------------------------------
         
         # 이미지 전처리 파이프라인
-        self.transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            # ImageNet Mean/Std (RGB 기준)
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
+        if is_train:
+            self.transform = transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2), # [추가] 조명 변화 대응
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+        else:
+            self.transform = transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
 
         # Min-Max Scaling을 위한 준비 (numpy -> tensor)
         self.min_val = torch.tensor(stats['min'], dtype=torch.float32)
