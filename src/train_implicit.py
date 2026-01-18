@@ -27,7 +27,7 @@ def generate_negatives(pos_actions, num_negatives, action_dim, device):
     neg_actions = pos_actions.unsqueeze(1).repeat(1, num_negatives, 1)
     
     # [2] Hard Negative (50%): 정답에 노이즈 섞기
-    noise = torch.randn_like(neg_actions) * 0.1 
+    noise = torch.randn_like(neg_actions) * 0.3
     neg_actions = neg_actions + noise
     
     # [3] Random Negative (50%): 완전 무작위
