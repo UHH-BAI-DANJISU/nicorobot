@@ -21,7 +21,7 @@ def predict_action_cem(
     model,
     image,
     device,
-    num_samples=1024,  # [수정] 4096 -> 1024 (CPU 최적화)
+    num_samples=4096,  # [수정] 4096 -> 1024 (CPU 최적화)
     num_iterations=3,
     num_elites=64,     # [수정] 32 -> 64 (상위 샘플 충분히 확보)
     action_dim=14
