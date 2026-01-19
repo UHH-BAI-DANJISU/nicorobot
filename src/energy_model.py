@@ -9,7 +9,7 @@ except ImportError:
 class EnergyModel(nn.Module):
     def __init__(self, action_dim=14, stats=None, device='cpu'):
         super().__init__()
-        # 1. Vision Encoder (6채널 설정)
+        # 1. Vision Encoder
         self.backbone = resnet18(pretrained=True)
         old_weight = self.backbone.conv1.weight
         new_weight = torch.cat([old_weight, old_weight], dim=1) 
@@ -47,41 +47,33 @@ class EnergyModel(nn.Module):
         return (norm_action + 1) / 2 * (self.action_max - self.action_min) + self.action_min
 
     def forward(self, images, actions):
-        # (1) Neural Network Energy (학습은 Degree로 해도 괜찮음)
+        """
+        [훈련용] 물리 오차(kinematic_error)를 제거!
+        모델이 오직 '이미지'와 '행동'의 관계만 보고 학습하도록 강제합니다.
+        """
         img_embed = self.backbone(images)      
         act_embed = self.action_encoder(actions) 
         combined = torch.cat([img_embed, act_embed], dim=1)
         energy_nn = self.head(combined) 
         
-        # (2) Kinematic Inconsistency Energy (여기가 핵심!)
-        raw_actions = self.denormalize(actions)
-        
-        # [수정] DFK 입력 전에 Degree -> Radian 변환 필수!
-        # 로봇 관절(0~7번)만 변환합니다.
-        joints_deg = raw_actions[:, :8]
-        joints_rad = joints_deg * (torch.pi / 180.0)  # 변환 공식 적용
-        
-        pred_pos_m = self.dfk(joints_rad) 
-        
-        # 정답(CSV)은 이미 미터(m) 단위(0.24 ~ 0.44)이므로 그대로 사용
-        target_pos_m = raw_actions[:, 8:11]
-        
-        kinematic_error = torch.norm(pred_pos_m - target_pos_m, dim=1, keepdim=True)
-        
-        # Total Energy
-        return energy_nn + (10.0 * kinematic_error)
-    
+        # 물리 오차 항 삭제 (꼼수 방지)
+        return energy_nn 
+
     def compute_vision_feature(self, images):
         return self.backbone(images)
 
     def score_with_feature(self, img_embed, actions):
+        """
+        [추론용] 실전에서는 물리 오차를 켜서, 로봇이 불가능한 자세를 취하지 않도록 가이드합니다.
+        """
         act_embed = self.action_encoder(actions)
         combined = torch.cat([img_embed, act_embed], dim=1)
         energy_nn = self.head(combined)
         
+        # --- Kinematic Error 계산 (추론 때만 사용) ---
         raw_actions = self.denormalize(actions)
         
-        # [수정] 여기도 Degree -> Radian 변환 추가
+        # Degree -> Radian 변환
         joints_deg = raw_actions[:, :8]
         joints_rad = joints_deg * (torch.pi / 180.0)
         
@@ -90,4 +82,5 @@ class EnergyModel(nn.Module):
         
         kinematic_error = torch.norm(pred_pos_m - target_pos_m, dim=1, keepdim=True)
         
+        # 추론 시: 신경망 에너지 + 물리 가이드
         return energy_nn + (10.0 * kinematic_error)
