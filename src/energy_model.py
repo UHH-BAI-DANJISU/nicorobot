@@ -47,30 +47,47 @@ class EnergyModel(nn.Module):
         return (norm_action + 1) / 2 * (self.action_max - self.action_min) + self.action_min
 
     def forward(self, images, actions):
-        # [수정] 모든 항이 '낮을수록 정답'이 되도록 구성
+        # (1) Neural Network Energy (학습은 Degree로 해도 괜찮음)
         img_embed = self.backbone(images)      
         act_embed = self.action_encoder(actions) 
         combined = torch.cat([img_embed, act_embed], dim=1)
         energy_nn = self.head(combined) 
         
+        # (2) Kinematic Inconsistency Energy (여기가 핵심!)
         raw_actions = self.denormalize(actions)
-        pred_pos_m = self.dfk(raw_actions[:, :8]) 
-        kinematic_error = torch.norm(pred_pos_m - raw_actions[:, 8:11], dim=1, keepdim=True)
         
-        # 신경망 출력(energy_nn) + 물리 오차 페널티(kinematic_error)
+        # [수정] DFK 입력 전에 Degree -> Radian 변환 필수!
+        # 로봇 관절(0~7번)만 변환합니다.
+        joints_deg = raw_actions[:, :8]
+        joints_rad = joints_deg * (torch.pi / 180.0)  # 변환 공식 적용
+        
+        pred_pos_m = self.dfk(joints_rad) 
+        
+        # 정답(CSV)은 이미 미터(m) 단위(0.24 ~ 0.44)이므로 그대로 사용
+        target_pos_m = raw_actions[:, 8:11]
+        
+        kinematic_error = torch.norm(pred_pos_m - target_pos_m, dim=1, keepdim=True)
+        
+        # Total Energy
         return energy_nn + (10.0 * kinematic_error)
     
     def compute_vision_feature(self, images):
         return self.backbone(images)
 
     def score_with_feature(self, img_embed, actions):
-        # [수정] 추론 시에도 학습과 동일한 에너지 계산식 적용
         act_embed = self.action_encoder(actions)
         combined = torch.cat([img_embed, act_embed], dim=1)
         energy_nn = self.head(combined)
         
         raw_actions = self.denormalize(actions)
-        pred_pos_m = self.dfk(raw_actions[:, :8])
-        kinematic_error = torch.norm(pred_pos_m - raw_actions[:, 8:11], dim=1, keepdim=True)
+        
+        # [수정] 여기도 Degree -> Radian 변환 추가
+        joints_deg = raw_actions[:, :8]
+        joints_rad = joints_deg * (torch.pi / 180.0)
+        
+        pred_pos_m = self.dfk(joints_rad)
+        target_pos_m = raw_actions[:, 8:11]
+        
+        kinematic_error = torch.norm(pred_pos_m - target_pos_m, dim=1, keepdim=True)
         
         return energy_nn + (10.0 * kinematic_error)

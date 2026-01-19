@@ -39,7 +39,7 @@ def main():
     action_dim = 14
     num_negatives = 64
     batch_size = 32
-    epochs = 100      
+    epochs = 30   
     lr = 1e-4
     
     checkpoint_path = "latest_checkpoint.pth"

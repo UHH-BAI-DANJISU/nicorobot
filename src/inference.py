@@ -153,7 +153,7 @@ def main():
     print(f"[Info] Using device: {device}")
 
     # [수정] 최종 모델 파일 혹은 체크포인트 자동 로드
-    model_path = "implicit_bc_final.pth"
+    model_path = "best_implicit_model.pth"
     if not os.path.exists(model_path):
         model_path = "latest_checkpoint.pth"
 
