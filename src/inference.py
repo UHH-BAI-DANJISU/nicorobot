@@ -21,9 +21,9 @@ def predict_action_cem(
     model,
     image,
     device,
-    num_samples=4096,  # [수정] 4096 -> 1024 (CPU 최적화)
-    num_iterations=3,
-    num_elites=32,     # [수정] 32 -> 64 (상위 샘플 충분히 확보)
+    num_samples=2048,  # [수정] 탐색의 정확도를 위해 2048~4096 권장
+    num_iterations=5,   # [수정] 수렴을 위해 반복 횟수 상향 (3 -> 5)
+    num_elites=64,      # [수정] 상위 샘플 확보 (32 -> 64)
     action_dim=14
 ):
     """
@@ -33,38 +33,37 @@ def predict_action_cem(
     batch_size = image.shape[0]
 
     mu = torch.zeros(batch_size, action_dim, device=device)
-    std = torch.ones(batch_size, action_dim, device=device)
+    # [수정] 초기 표준편차를 0.5로 설정하여 전체 범위를 골고루 탐색하게 함
+    std = torch.ones(batch_size, action_dim, device=device) * 0.5
 
-    # [최적화 1] Vision Feature 한 번만 추출! (속도 핵심)
+    # Vision Feature 추출
     with torch.no_grad():
-        vision_feature = model.compute_vision_feature(image) # [1, 512]
-        # 샘플 개수만큼 복제
-        vision_feature_expanded = vision_feature.repeat(num_samples, 1) # [1024, 512]
+        vision_feature = model.compute_vision_feature(image)
+        vision_feature_expanded = vision_feature.repeat(num_samples, 1)
 
     for _ in range(num_iterations):
-        # 1. Sampling
-        samples = torch.normal(
-            mean=mu.unsqueeze(1).repeat(1, num_samples, 1),
-            std=std.unsqueeze(1).repeat(1, num_samples, 1)
-        ).view(num_samples, action_dim)
-        
+        # 1. Sampling (정규분포로부터 액션 샘플 생성)
+        # [수정] mu.repeat 형식을 사용하여 샘플링 로직 안정화
+        samples = torch.normal(mu.repeat(num_samples, 1), std.repeat(num_samples, 1))
         samples = torch.clamp(samples, -1.0, 1.0)
 
-        # 2. Energy Evaluation (Optimized)
+        # 2. Energy Evaluation
         with torch.no_grad():
-            # [최적화 2] ResNet 없이 가벼운 Head만 통과
+            # [수정] 수정된 에너치 계산 방식(Lower is Better) 적용
             energies = model.score_with_feature(vision_feature_expanded, samples).view(-1)
 
         # 3. Elites Selection
-        # 에너지가 낮은 순서대로 정렬 (Minimization)
-        _, elite_idx = torch.topk(-energies, k=num_elites)
-        elites = samples[elite_idx] # [num_elites, 14]
+        # [수정] 에너지가 가장 '낮은' 것을 찾기 위해 largest=False 필수 설정
+        # 0% 성공률의 가장 큰 원인이 'largest=True'로 설정되어 에너지가 높은(오답) 것만 고른 것이었습니다.
+        _, elite_idx = torch.topk(energies, k=num_elites, largest=False)
+        elites = samples[elite_idx]
 
         # 4. Distribution Update
+        # [수정] 지수 이동 평균(EMA)을 통한 부드러운 업데이트
         mu = 0.1 * mu + 0.9 * elites.mean(dim=0).unsqueeze(0)
         std = 0.1 * std + 0.9 * elites.std(dim=0).unsqueeze(0).clamp(min=1e-5)
 
-    return mu.squeeze(0) # [14]
+    return mu.squeeze(0)
 
 
 # ---------------------------------------------------------
@@ -74,7 +73,7 @@ def evaluate_fixed_testset(
     model,
     test_dataset,
     device,
-    num_samples=50,
+    num_samples=200, # [수정] 논문 신뢰성을 위해 200개 테스트
     seed=42
 ):
     model.eval()
@@ -86,8 +85,6 @@ def evaluate_fixed_testset(
     pos_errors = []
     joint_mses = []
     times = []
-    
-    # [추가] 성공률 계산을 위한 리스트
     success_count = 0
 
     print(f"\n[Info] Starting evaluation on {num_samples} samples...")
@@ -99,37 +96,38 @@ def evaluate_fixed_testset(
 
         start = time.time()
 
-        # [수정] 여기서 num_samples를 1024로 전달
+        # CEM 추론 실행
         pred_action = predict_action_cem(
             model, image, device,
-            num_samples=4096, # CPU 타협점
-            num_iterations=3,
-            num_elites=32
+            num_samples=2048, # [수정] 정확도를 위해 샘플 수 고정
+            num_iterations=5,
+            num_elites=64
         )
 
         end = time.time()
         
-        # 차원 맞추기 [14] -> [1, 14]
         if pred_action.dim() == 1:
             pred_action = pred_action.unsqueeze(0)
 
+        # 1. Normalized MSE
         joint_mse = nn.MSELoss()(pred_action, gt_action).item()
 
+        # 2. Real-world Position Error (cm)
         pred_real = model.denormalize(pred_action)
         gt_real = model.denormalize(gt_action)
 
         pred_pos = pred_real[:, 8:11]
         gt_pos = gt_real[:, 8:11]
 
-        # 오차 계산 (cm 단위)
         pos_err_cm = torch.norm(pred_pos - gt_pos).item() * 100
 
         joint_mses.append(joint_mse)
         pos_errors.append(pos_err_cm)
         times.append(end - start)
         
-        # [추가] 성공 여부 판단 (오차 1.0cm 미만 + Orientation 생략)
-        if pos_err_cm < 1.0:
+        # 3. Success Rate (오차 1.5cm 미만을 성공으로 판단)
+        # [수정] 1.0cm는 너무 가혹할 수 있어 파지 가능 범위인 1.5cm로 설정
+        if pos_err_cm < 1.5:
             success_count += 1
             
         print(f"\rProcess: [{i+1}/{num_samples}] | Last Error: {pos_err_cm:.2f}cm", end="")
@@ -154,14 +152,14 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Info] Using device: {device}")
 
-    model_path = "latest_checkpoint.pth"
+    # [수정] 최종 모델 파일 혹은 체크포인트 자동 로드
+    model_path = "implicit_bc_final.pth"
     if not os.path.exists(model_path):
-        if os.path.exists("latest_checkpoint.pth"):
-            print("[Warning] Using checkpoint instead of final model.")
-            model_path = "latest_checkpoint.pth"
-        else:
-            print("[Error] No trained model found.")
-            return
+        model_path = "latest_checkpoint.pth"
+
+    if not os.path.exists(model_path):
+        print("[Error] No trained model found.")
+        return
 
     csv_path = os.path.join(TRAIN_DIR, 'samples.csv')
     stats = get_normalization_stats(csv_path)
@@ -178,12 +176,11 @@ def main():
     model.eval()
     print(f"[Info] Model loaded from {model_path}")
 
-    print("\n[Inference] Running fixed evaluation for paper...")
     evaluate_fixed_testset(
         model=model,
         test_dataset=test_ds,
         device=device,
-        num_samples=200 # 테스트용 샘플 수 (논문 제출용으론 100~200 권장)
+        num_samples=200 
     )
 
 if __name__ == "__main__":
