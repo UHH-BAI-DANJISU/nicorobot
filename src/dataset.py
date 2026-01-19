@@ -168,7 +168,7 @@ class NICORobotDataset(Dataset):
         action_tensor = torch.tensor(raw_action, dtype=torch.float32)
 
         # Min-Max Normalization to [-1, 1]
-        normalized_action = 2 * (action_tensor - self.min_val) / self.scale
+        normalized_action = 2 * (action_tensor - self.min_val) / self.scale - 1.0
         
         # Proprioception: 현재 로봇의 관절 상태 (Action의 앞부분 8개가 Joint임)
         proprioception = normalized_action[:8]
