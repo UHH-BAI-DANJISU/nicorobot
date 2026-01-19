@@ -70,17 +70,5 @@ class EnergyModel(nn.Module):
         combined = torch.cat([img_embed, act_embed], dim=1)
         energy_nn = self.head(combined)
         
-        # --- Kinematic Error 계산 (추론 때만 사용) ---
-        raw_actions = self.denormalize(actions)
-        
-        # Degree -> Radian 변환
-        joints_deg = raw_actions[:, :8]
-        joints_rad = joints_deg * (torch.pi / 180.0)
-        
-        pred_pos_m = self.dfk(joints_rad)
-        target_pos_m = raw_actions[:, 8:11]
-        
-        kinematic_error = torch.norm(pred_pos_m - target_pos_m, dim=1, keepdim=True)
-        
         # 추론 시: 신경망 에너지 + 물리 가이드
-        return energy_nn + (10.0 * kinematic_error)
+        return energy_nn
