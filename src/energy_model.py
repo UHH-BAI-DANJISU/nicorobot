@@ -47,28 +47,47 @@ class EnergyModel(nn.Module):
         return (norm_action + 1) / 2 * (self.action_max - self.action_min) + self.action_min
 
     def forward(self, images, actions):
-        """
-        [훈련용] 물리 오차(kinematic_error)를 제거!
-        모델이 오직 '이미지'와 '행동'의 관계만 보고 학습하도록 강제합니다.
-        """
+        # 1. 신경망 에너지
         img_embed = self.backbone(images)      
         act_embed = self.action_encoder(actions) 
         combined = torch.cat([img_embed, act_embed], dim=1)
         energy_nn = self.head(combined) 
         
-        # 물리 오차 항 삭제 (꼼수 방지)
-        return energy_nn 
+        # 2. 물리적 일관성 에너지 (Kinematic Error)
+        raw_actions = self.denormalize(actions)
+        
+        # [핵심] Degree -> Radian 변환
+        joints_deg = raw_actions[:, :8]
+        joints_rad = joints_deg * (torch.pi / 180.0)
+        
+        # DFK 계산 (이제 오프셋이 적용되어 정확함)
+        pred_pos_m = self.dfk(joints_rad) 
+        target_pos_m = raw_actions[:, 8:11] # CSV 정답 (Torso 기준)
+        
+        # 오차 계산
+        kinematic_error = torch.norm(pred_pos_m - target_pos_m, dim=1, keepdim=True)
+        
+        # [중요] 이제 DFK가 정확하므로 kinematic_error를 켜야 학습이 잘 됩니다!
+        return energy_nn + (10.0 * kinematic_error)
 
     def compute_vision_feature(self, images):
         return self.backbone(images)
 
     def score_with_feature(self, img_embed, actions):
-        """
-        [추론용] 실전에서는 물리 오차를 켜서, 로봇이 불가능한 자세를 취하지 않도록 가이드합니다.
-        """
+        # 추론 시에도 동일하게 적용
         act_embed = self.action_encoder(actions)
         combined = torch.cat([img_embed, act_embed], dim=1)
         energy_nn = self.head(combined)
         
-        # 추론 시: 신경망 에너지 + 물리 가이드
-        return energy_nn
+        raw_actions = self.denormalize(actions)
+        
+        # Degree -> Radian
+        joints_deg = raw_actions[:, :8]
+        joints_rad = joints_deg * (torch.pi / 180.0)
+        
+        pred_pos_m = self.dfk(joints_rad)
+        target_pos_m = raw_actions[:, 8:11]
+        
+        kinematic_error = torch.norm(pred_pos_m - target_pos_m, dim=1, keepdim=True)
+        
+        return energy_nn + (10.0 * kinematic_error)

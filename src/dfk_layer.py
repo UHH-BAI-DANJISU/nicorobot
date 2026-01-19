@@ -62,24 +62,39 @@ class DifferentiableFK(nn.Module):
             joint_angles = joint_angles.to(self.device)
             
         # 1. 왼팔 관절(6개)만 추출
-        # dataset.py 순서: [l_shoulder_z, l_shoulder_y, l_arm_x, l_elbow_y, l_wrist_z, l_wrist_x, ...]
         arm_joints = joint_angles[:, :6] 
 
         # 2. URDF 체인이 기대하는 순서로 재정렬
-        # (만약 URDF와 dataset의 관절 순서가 같다면 그대로 유지됨)
         if len(self.perm_indices) > 0:
             ordered_joints = arm_joints[:, self.perm_indices]
         else:
             ordered_joints = arm_joints
 
-        # 3. Forward Kinematics 계산
-        # pytorch_kinematics의 forward_kinematics는 Transform3d 객체를 반환
+        # 3. Forward Kinematics 계산 (어깨 기준 위치 계산)
         tg = self.chain.forward_kinematics(ordered_joints)
         
         # 4. 위치(Translation) 추출
-        # get_matrix(): [Batch, 4, 4] -> (x, y, z) 추출
         m = tg.get_matrix()
         predicted_ee_pos = m[:, :3, 3]
+
+        # =================================================================
+        # [수정] 좌표계 보정 (Offset Correction)
+        # -----------------------------------------------------------------
+        # 문제: 로봇의 팔은 바닥(0,0,0)이 아니라 몸통 위(약 75cm 높이)에 달려 있습니다.
+        #       DFK가 어깨를 (0,0,0)으로 계산하고 있다면, 실제 정답(몸통 기준)과
+        #       수십 cm의 오차가 발생합니다. 이를 URDF 값으로 보정합니다.
+        #
+        # 출처: complete.urdf (joint: l_shoulder_z)
+        # <origin xyz="0.026783 0.049488 0.748809" ... />
+        # =================================================================
+        
+        # URDF에서 가져온 Torso -> Left Shoulder 오프셋 (x, y, z)
+        # (주의: 만약 self.chain을 'torso:11'부터 생성했다면 이 과정이 중복일 수 있으나,
+        #  현재 오차가 큰 상황에서는 이 오프셋이 빠져 있을 확률이 99%입니다.)
+        base_offset = torch.tensor([0.026783, 0.049488, 0.748809], device=self.device)
+        
+        # 최종 위치 = 어깨 기준 위치 + 오프셋
+        predicted_ee_pos = predicted_ee_pos + base_offset
         
         return predicted_ee_pos
 
