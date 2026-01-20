@@ -1,17 +1,22 @@
 import torch
 import torch.nn as nn
-# model_architecture에서 가져오기
-from model_architecture import VisionEncoder 
-from dfk_layer import DifferentiableFK
+try:
+    from model_architecture import VisionEncoder
+except ImportError:
+    from model_architecture import VisionEncoder
+try:
+    from dfk_layer import DifferentiableFK
+except ImportError:
+    from dfk_layer import DifferentiableFK
 
 class EnergyModel(nn.Module):
     def __init__(self, action_dim=14, stats=None, device='cpu'):
         super().__init__()
         
-        # 1. Vision Encoder (Spatial Softmax 적용됨)
+        # 1. Vision Encoder (Spatial Softmax)
         self.encoder = VisionEncoder()
         
-        # 6채널 입력 수정 (Stereo)
+        # 6채널 입력 (Stereo)
         original_conv = self.encoder.features[0]
         self.encoder.features[0] = nn.Conv2d(
             in_channels=6,
@@ -23,7 +28,6 @@ class EnergyModel(nn.Module):
         )
         
         # 2. Energy MLP
-        # 입력: Vision(1024) + Action(14)
         input_dim = self.encoder.output_dim + action_dim
         
         self.energy_net = nn.Sequential(
@@ -51,9 +55,15 @@ class EnergyModel(nn.Module):
         x = torch.cat([visual_emb, action], dim=1)
         energy_nn = self.energy_net(x)
         
-        # DFK Loss (Training용)
+        # [수정] Training 중 DFK Loss 계산
+        # 1. Denormalize
         raw_actions = self.denormalize(action)
-        joints_rad = raw_actions[:, :6] * (torch.pi / 180.0) # 왼팔 6개만
+        
+        # 2. Joint Angles (이미 Radian이라고 가정!)
+        # 변환 코드 삭제함: joints_rad = joints_deg * ... (삭제)
+        joints_rad = raw_actions[:, :6] 
+        
+        # 3. DFK & Error
         pred_pos = self.dfk(joints_rad)
         target_pos = raw_actions[:, 8:11]
         
@@ -67,9 +77,10 @@ class EnergyModel(nn.Module):
         x = torch.cat([vision_feature, action], dim=1)
         energy_nn = self.energy_net(x)
         
-        # Inference에서도 DFK Error를 더해서 물리적 일관성 유도
+        # [수정] Inference 중 DFK Consistency Check
         raw_actions = self.denormalize(action)
-        joints_rad = raw_actions[:, :6] * (torch.pi / 180.0)
+        joints_rad = raw_actions[:, :6] # 이미 Radian
+        
         pred_pos = self.dfk(joints_rad)
         target_pos = raw_actions[:, 8:11]
         

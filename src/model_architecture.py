@@ -26,19 +26,20 @@ class SpatialSoftmax(nn.Module):
         expected_x = torch.sum(pos_x * softmax_attention, dim=2, keepdim=True)
         expected_y = torch.sum(pos_y * softmax_attention, dim=2, keepdim=True)
         
+        # [Batch, C*2]
         return torch.cat([expected_x, expected_y], dim=2).view(batch, -1)
 
 class VisionEncoder(nn.Module):
     def __init__(self):
         super().__init__()
         resnet = resnet18(pretrained=True)
-        # GAP와 FC 제거, Layer4까지만 사용
+        # Layer4까지만 사용 (Spatial Softmax를 위해)
         self.features = nn.Sequential(
             resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool,
             resnet.layer1, resnet.layer2, resnet.layer3, resnet.layer4
         )
         self.spatial_softmax = SpatialSoftmax()
-        # ResNet18 Layer4 채널(512) * 2(x,y) = 1024
+        # ResNet18 Layer4(512ch) -> 512*2(x,y) = 1024
         self.output_dim = 1024 
 
     def forward(self, x):

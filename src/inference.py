@@ -62,8 +62,7 @@ def predict_action_cem(
             raw_samples = model.denormalize(samples_flat)
             
             # Joint (Degree) -> Radian
-            joints_deg = raw_samples[:, :6] # Arm joints only for DFK
-            joints_rad = joints_deg * (torch.pi / 180.0)
+            joints_rad = raw_samples[:, :6]  # 왼팔 6개 관절
             
             # DFK Forward
             pred_pos = dfk_layer(joints_rad) # [B*S, 3]

@@ -4,78 +4,60 @@ import pytorch_kinematics as pk
 import os
 
 class DifferentiableFK(nn.Module):
+    import torch
+import torch.nn as nn
+import pytorch_kinematics as pk
+import os
+
+class DifferentiableFK(nn.Module):
     def __init__(self, device='cpu', urdf_path='complete.urdf', end_link_name='left_palm:11'):
         super().__init__()
         self.device = device
         
-        # 1. URDF 파일 경로 탐색 (현재 폴더 혹은 상위 폴더)
+        # URDF 경로 찾기
         if not os.path.exists(urdf_path):
-            # ../complete.urdf 시도
             parent_path = os.path.join(os.path.dirname(__file__), '..', urdf_path)
             if os.path.exists(parent_path):
                 urdf_path = parent_path
             else:
-                # 못 찾으면 에러 발생 (또는 다운로드 로직 등)
-                raise FileNotFoundError(f"[DFK Error] Cannot find URDF file at: {urdf_path}")
+                raise FileNotFoundError(f"[DFK Error] Cannot find URDF at: {urdf_path}")
 
-        print(f"[Info] Loading URDF from: {urdf_path}")
-
-        # 2. Build Serial Chain (Base -> End Effector)
-        # NICO 로봇: 'torso:11' (Base) -> 'left_palm:11' (End Effector)
-        # URDF 데이터를 읽어서 체인 생성
+        # 체인 생성
         with open(urdf_path, 'rb') as f:
             urdf_data = f.read()
         
         self.chain = pk.build_serial_chain_from_urdf(
             urdf_data, 
             end_link_name=end_link_name
-        )
-        self.chain = self.chain.to(device=device)
+        ).to(device=device)
         
-        # 3. Joint Mapping 준비
-        # dataset.py의 입력 관절 순서 (왼팔 6 자유도)
+        # 관절 매핑 (왼팔 6개)
         self.input_joint_names = [
             'l_shoulder_z', 'l_shoulder_y', 'l_arm_x', 
             'l_elbow_y', 'l_wrist_z', 'l_wrist_x'
         ]
-        
-        # 체인(URDF)에서 실제 구동되는 관절 이름 목록 가져오기
         self.chain_joint_names = self.chain.get_joint_parameter_names()
-        
-        # 입력 벡터(dataset 순서)를 체인(URDF 순서)에 맞게 재정렬할 인덱스 생성
-        self.perm_indices = []
-        for name in self.chain_joint_names:
-            if name in self.input_joint_names:
-                idx = self.input_joint_names.index(name)
-                self.perm_indices.append(idx)
-            else:
-                print(f"[Warning] Joint '{name}' in URDF chain is not in input list. (Will be treated as 0?)")
+        self.perm_indices = [self.input_joint_names.index(name) for name in self.chain_joint_names if name in self.input_joint_names]
 
     def forward(self, joint_angles):
-        """
-        Input: joint_angles [Batch, 8] (또는 14) 
-               - dataset.py 기준 0~5번 인덱스가 왼팔 관절
-        Output: predicted_ee_pos [Batch, 3] (x, y, z)
-        """
-        # 입력 데이터 Device 이동
         if joint_angles.device != torch.device(self.device):
             joint_angles = joint_angles.to(self.device)
             
-        # 1. 왼팔 관절(6개)만 추출
+        # 1. 왼팔 6개 관절만 사용
         arm_joints = joint_angles[:, :6] 
 
-        # 2. URDF 체인이 기대하는 순서로 재정렬
+        # 2. 순서 재정렬
         if len(self.perm_indices) > 0:
             ordered_joints = arm_joints[:, self.perm_indices]
         else:
             ordered_joints = arm_joints
 
-        # 3. Forward Kinematics 계산 (어깨 기준 위치 계산)
+        # 3. FK 계산
         tg = self.chain.forward_kinematics(ordered_joints)
-        
-        # 4. 위치(Translation) 추출
-        m = tg.get_matrix()
-        predicted_ee_pos = m[:, :3, 3]
+        predicted_ee_pos = tg.get_matrix()[:, :3, 3]
+
+        # [수정] 중복 오프셋 삭제됨!
+        # pytorch_kinematics가 이미 URDF의 origin을 처리합니다.
         
         return predicted_ee_pos
 
