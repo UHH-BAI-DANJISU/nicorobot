@@ -13,7 +13,7 @@ sys.path.append(CURRENT_DIR)
 
 from dataset import NICORobotDataset, get_normalization_stats, TRAIN_DIR, TEST_DIR
 from energy_model import EnergyModel
-from dfk_layer import DifferentiableFK  #  (개념적 참조)
+from dfk_layer import DifferentiableFK 
 
 # ---------------------------------------------------------
 # 1. CEM-based inference (Implicit BC)
@@ -33,18 +33,19 @@ def predict_action_cem(
     """
     batch_size = image.shape[0]
 
+    # Initialize sampling distribution
     mu = torch.zeros(batch_size, action_dim, device=device)
     std = torch.ones(batch_size, action_dim, device=device) * 0.5
 
-    # 1. Vision Feature 미리 추출 (속도 최적화)
+    # Pre-compute vision features for optimization
     with torch.no_grad():
         vision_feature = model.compute_vision_feature(image)
-        # [B, 1024] -> [B * Samples, 1024]
+        # Expand vision feature: [B, 1024] -> [B * Samples, 1024]
         vision_feature_expanded = vision_feature.repeat_interleave(num_samples, dim=0)
 
     for i in range(num_iterations):
         # --- Sampling ---
-        # [B, Samples, Dim] 형태로 생성 후 펼치기
+        # Generate samples from Gaussian distribution and clamp to action range
         samples = torch.normal(mu.unsqueeze(1).repeat(1, num_samples, 1), 
                                std.unsqueeze(1).repeat(1, num_samples, 1))
         samples = torch.clamp(samples, -1.0, 1.0)
@@ -62,21 +63,21 @@ def predict_action_cem(
             raw_samples = model.denormalize(samples_flat)
             
             # Joint (Degree) -> Radian
-            joints_rad = raw_samples[:, :6]  # 왼팔 6개 관절
+            joints_rad = raw_samples[:, :6]  
             
             # DFK Forward
             pred_pos = dfk_layer(joints_rad) # [B*S, 3]
-            target_pos = raw_samples[:, 8:11] # [B*S, 3] (Hand Pos columns)
+            target_pos = raw_samples[:, 8:11] # [B*S, 3] (Hand position in CSV)
             
             # Euclidean Distance Error
             kinematic_error = torch.norm(pred_pos - target_pos, dim=1).view(batch_size, num_samples)
 
             # C. Total Energy
-            # alpha=10.0 (가중치)
+            # alpha=10.0 (weight)
             total_energy = neural_energy + (10.0 * kinematic_error)
 
         # --- Elites Selection ---
-        # 에너지가 가장 낮은(Best) 샘플 선택
+        # Select samples with the lowest energy
         _, elite_idx = torch.topk(total_energy, k=num_elites, dim=1, largest=False)
         
         # elite_idx: [B, Elites] -> Gather elites
@@ -205,7 +206,7 @@ def main():
         dfk_layer=dfk_layer,
         test_dataset=test_ds,
         device=device,
-        num_samples=100 # 테스트 샘플 수 조정 가능
+        num_samples=100 
     )
 
 if __name__ == "__main__":

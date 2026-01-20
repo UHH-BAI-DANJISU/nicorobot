@@ -16,7 +16,7 @@ class EnergyModel(nn.Module):
         # 1. Vision Encoder
         self.encoder = VisionEncoder()
         
-        # 6채널 입력 (Stereo)
+        # Modify first layer for 6-channel (Stereo) input
         original_conv = self.encoder.features[0]
         self.encoder.features[0] = nn.Conv2d(
             in_channels=6,
@@ -40,9 +40,10 @@ class EnergyModel(nn.Module):
             nn.Linear(256, 1)
         )
         
+        # Kinematic Layer
         self.dfk = DifferentiableFK(device=device)
         
-        # Stats 등록
+        # Register Action Stats for Denormalization
         if stats is not None:
             self.register_buffer('action_min', torch.tensor(stats['min'], dtype=torch.float32))
             self.register_buffer('action_max', torch.tensor(stats['max'], dtype=torch.float32))
@@ -55,18 +56,20 @@ class EnergyModel(nn.Module):
         x = torch.cat([visual_emb, action], dim=1)
         energy_nn = self.energy_net(x)
         
-        # [수정] Training 중 DFK Loss 계산
+        # Calculate Kinematic Consistency Loss during Training
         raw_actions = self.denormalize(action)
         
-        # >>> [핵심 복구] 데이터가 Degree이므로 Radian으로 변환 필수! <<<
+        # Convert Degree to Radian for DFK (Critical for correct calculation)
         joints_deg = raw_actions[:, :6] 
         joints_rad = joints_deg * (torch.pi / 180.0)
         
-        # DFK (이제 오프셋 보정됨) & Error
+        # Compute DFK with TCP offset and calculate error
         pred_pos = self.dfk(joints_rad)
         target_pos = raw_actions[:, 8:11]
         
         k_err = torch.norm(pred_pos - target_pos, dim=1, keepdim=True)
+
+        # Final Energy = NN Energy + Weighted Kinematic Error
         return energy_nn + (10.0 * k_err)
 
     def compute_vision_feature(self, img):
@@ -76,10 +79,10 @@ class EnergyModel(nn.Module):
         x = torch.cat([vision_feature, action], dim=1)
         energy_nn = self.energy_net(x)
         
-        # [수정] Inference 중 DFK Consistency Check
+        # Kinematic Consistency Check during Inference
         raw_actions = self.denormalize(action)
         
-        # >>> [핵심 복구] Inference에서도 변환 필수! <<<
+        # Convert Degree to Radian for DFK
         joints_deg = raw_actions[:, :6]
         joints_rad = joints_deg * (torch.pi / 180.0)
         
@@ -90,4 +93,5 @@ class EnergyModel(nn.Module):
         return energy_nn + (10.0 * k_err)
 
     def denormalize(self, norm_action):
+        # Maps actions from [-1, 1] back to original scale.
         return (norm_action + 1) / 2 * (self.action_max - self.action_min) + self.action_min

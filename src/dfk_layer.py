@@ -8,7 +8,7 @@ class DifferentiableFK(nn.Module):
         super().__init__()
         self.device = device
         
-        # URDF 경로 찾기
+        # Locate URDF path
         if not os.path.exists(urdf_path):
             parent_path = os.path.join(os.path.dirname(__file__), '..', urdf_path)
             if os.path.exists(parent_path):
@@ -16,7 +16,7 @@ class DifferentiableFK(nn.Module):
             else:
                 raise FileNotFoundError(f"[DFK Error] Cannot find URDF at: {urdf_path}")
 
-        # 체인 생성
+        # Build kinematic chain from URDF
         with open(urdf_path, 'rb') as f:
             urdf_data = f.read()
         
@@ -25,7 +25,7 @@ class DifferentiableFK(nn.Module):
             end_link_name=end_link_name
         ).to(device=device)
         
-        # 관절 매핑
+        # Define joint mapping
         self.input_joint_names = [
             'l_shoulder_z', 'l_shoulder_y', 'l_arm_x', 
             'l_elbow_y', 'l_wrist_z', 'l_wrist_x'
@@ -33,27 +33,26 @@ class DifferentiableFK(nn.Module):
         self.chain_joint_names = self.chain.get_joint_parameter_names()
         self.perm_indices = [self.input_joint_names.index(name) for name in self.chain_joint_names if name in self.input_joint_names]
         
-        # [수정] 진단 스크립트로 찾아낸 오프셋 보정값 (GT - DFK)
-        # 이 값을 더해주어야 DFK 결과가 실제 정답 위치와 일치하게 됨
+        # This aligns DFK output with the ground truth hand position
         self.register_buffer('tcp_offset', torch.tensor([-0.02256, -0.02931, -0.02383], device=device))
 
     def forward(self, joint_angles):
         if joint_angles.device != torch.device(self.device):
             joint_angles = joint_angles.to(self.device)
             
-        # 1. 관절값 추출
+        # 1. Extract arm joints
         arm_joints = joint_angles[:, :6] 
 
-        # 2. 순서 재정렬
+        # 2. Reorder joints to match URDF chain
         if len(self.perm_indices) > 0:
             ordered_joints = arm_joints[:, self.perm_indices]
         else:
             ordered_joints = arm_joints
 
-        # 3. FK 계산
+        # 3. Compute Forward Kinematics
         tg = self.chain.forward_kinematics(ordered_joints)
         predicted_ee_pos = tg.get_matrix()[:, :3, 3]
 
-        # 4. [핵심 수정] 오프셋 보정 적용
-        # DFK(Palm) 위치에 보정값을 더해 GT(Hand) 위치로 변환
+        # 4. Apply TCP offset correction
+        # Transforms DFK (Palm) position to Ground Truth (Hand) position
         return predicted_ee_pos + self.tcp_offset

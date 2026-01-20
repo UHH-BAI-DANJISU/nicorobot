@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 # ---------------------------------------------------------
-# [Setup] 프로젝트 경로 및 커스텀 모듈 임포트
+# [Setup] Project paths and custom module imports
 # ---------------------------------------------------------
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
@@ -17,12 +17,12 @@ sys.path.append(current_dir)
 try:
     from dataset import NICORobotDataset, get_normalization_stats
 except ImportError:
-    raise ImportError("'dataset.py' 파일이 src 폴더 내에 있어야 합니다.")
+    raise ImportError("'dataset.py' must be located in the src folder.")
 
 try:
     from model_architecture import VisionEncoder
 except ImportError:
-    raise ImportError("'model_architecture.py' 파일을 src 폴더에 생성해주세요.")
+    raise ImportError("Please create 'model_architecture.py' in the src folder.")
 
 # ---------------------------------------------------------
 # 1. Kinematics Wrapper
@@ -32,7 +32,7 @@ class NICOArmKinematics:
         self.device = device
         
         if not os.path.exists(urdf_path):
-            raise FileNotFoundError(f"URDF 파일을 찾을 수 없습니다: {urdf_path}")
+            raise FileNotFoundError(f"URDF file not found: {urdf_path}")
 
         self.chain = pk.build_serial_chain_from_urdf(
             open(urdf_path).read(), 
@@ -81,11 +81,11 @@ class EnergyModel(nn.Module):
             nn.Linear(256, 1)
         )
     
-    # [최적화 1] Vision Feature만 따로 계산하는 함수
+    # Extract vision features separately to avoid redundant CNN passes
     def compute_vision_feature(self, img):
         return self.encoder(img) # [Batch, 1024]
 
-    # [최적화 2] 미리 계산된 Feature와 Action으로 Energy 계산
+    # Compute energy using pre-computed features and action candidates
     def score_with_feature(self, vision_feature, action):
         # vision_feature: [Batch, 1024]
         # action: [Batch, 14]
@@ -93,7 +93,6 @@ class EnergyModel(nn.Module):
         return self.energy_net(x)
 
     def forward(self, img, action):
-        # 기존 방식 (Inference용)
         visual_emb = self.compute_vision_feature(img)
         return self.score_with_feature(visual_emb, action)
 
@@ -104,18 +103,17 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Info] Device: {device}")
 
-    # 경로 설정
+    # Path Configuration
     BASE_DIR = 'data/' 
     TRAIN_DIR = os.path.join(BASE_DIR, 'real_evo_ik_samples')
     TEST_DIR = os.path.join(BASE_DIR, 'real_evo_ik_samples_test')
     URDF_PATH = os.path.join(os.path.dirname(current_dir), 'complete.urdf')
 
-    # [메모리 절약을 위해 배치 사이즈 축소]
-    # CPU에서는 256도 부담될 수 있으니 64로 줄임
+    # Training Hyperparameters
     BATCH_SIZE = 64 
     LR = 1e-4
     EPOCHS = 100
-    NUM_NEGATIVES = 64 
+    NUM_NEGATIVES = 64 # Number of negative samples per positive sample
 
     # ---------------- Data Loading ----------------
     train_csv = os.path.join(TRAIN_DIR, 'samples.csv')
@@ -128,7 +126,6 @@ def main():
     train_ds = NICORobotDataset(TRAIN_DIR, stats, is_train=True)
     test_ds = NICORobotDataset(TEST_DIR, stats, is_train=False)
     
-    # CPU 과부하 방지를 위해 num_workers도 줄임 (4 -> 2)
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
     test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
     
@@ -161,7 +158,7 @@ def main():
             
             curr_batch_size = images.shape[0]
 
-            # [최적화 핵심] 이미지는 딱 한 번만 인코딩! (ResNet 1회 실행)
+            # encode image only once per batch
             vision_features = model.compute_vision_feature(images) # [B, 1024]
 
             # 1. Positive Energy
@@ -187,7 +184,7 @@ def main():
             neg_actions_raw = torch.cat([rand_joints_raw, rand_cart_raw], dim=1)
             neg_actions = 2 * (neg_actions_raw - stats_min) / stats_scale - 1.0
             
-            # [최적화 핵심] Feature 벡터만 복사해서 사용 (이미지 복사 X)
+            # Expand vision features (copying pointers, not re-encoding images)
             # [B, 1024] -> [B * N, 1024]
             vision_features_expanded = vision_features.repeat_interleave(NUM_NEGATIVES, dim=0)
             
