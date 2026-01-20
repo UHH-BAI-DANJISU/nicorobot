@@ -1,24 +1,17 @@
 import torch
 import torch.nn as nn
-try:
-    from model_architecture import VisionEncoder
-except ImportError:
-    # inference.py 실행 시 경로 문제 방지
-    import sys
-    import os
-    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    from model_architecture import VisionEncoder
+# model_architecture에서 가져오기
+from model_architecture import VisionEncoder 
+from dfk_layer import DifferentiableFK
 
 class EnergyModel(nn.Module):
     def __init__(self, action_dim=14, stats=None, device='cpu'):
         super().__init__()
         
-        # ------------------------------------------------------------------
-        # [구조 일치] train_implicit.py와 동일한 Vision Encoder 사용
-        # ------------------------------------------------------------------
-        self.encoder = VisionEncoder() 
+        # 1. Vision Encoder (Spatial Softmax 적용됨)
+        self.encoder = VisionEncoder()
         
-        # [중요] 6채널 입력 (Stereo) 수정 로직도 동일하게 적용
+        # 6채널 입력 수정 (Stereo)
         original_conv = self.encoder.features[0]
         self.encoder.features[0] = nn.Conv2d(
             in_channels=6,
@@ -29,44 +22,59 @@ class EnergyModel(nn.Module):
             bias=original_conv.bias
         )
         
-        # ------------------------------------------------------------------
-        # [구조 일치] train_implicit.py와 동일한 MLP (키 이름: energy_net)
-        # ------------------------------------------------------------------
+        # 2. Energy MLP
+        # 입력: Vision(1024) + Action(14)
         input_dim = self.encoder.output_dim + action_dim
         
         self.energy_net = nn.Sequential(
             nn.Linear(input_dim, 256),
-            nn.ReLU(),
+            nn.LeakyReLU(0.2),
             nn.Linear(256, 256),
-            nn.ReLU(),
+            nn.LeakyReLU(0.2),
             nn.Linear(256, 256),
-            nn.ReLU(),
+            nn.LeakyReLU(0.2),
             nn.Linear(256, 1)
         )
         
-        # Min-Max Stats 저장 (Denormalization용)
+        self.dfk = DifferentiableFK(device=device)
+        
+        # Stats 등록
         if stats is not None:
             self.register_buffer('action_min', torch.tensor(stats['min'], dtype=torch.float32))
             self.register_buffer('action_max', torch.tensor(stats['max'], dtype=torch.float32))
         else:
-            # 로드 시 에러 방지를 위해 임시 버퍼 등록 (나중에 덮어씌워짐)
             self.register_buffer('action_min', torch.zeros(action_dim))
             self.register_buffer('action_max', torch.ones(action_dim))
 
     def forward(self, img, action):
         visual_emb = self.encoder(img)
         x = torch.cat([visual_emb, action], dim=1)
-        return self.energy_net(x)
+        energy_nn = self.energy_net(x)
+        
+        # DFK Loss (Training용)
+        raw_actions = self.denormalize(action)
+        joints_rad = raw_actions[:, :6] * (torch.pi / 180.0) # 왼팔 6개만
+        pred_pos = self.dfk(joints_rad)
+        target_pos = raw_actions[:, 8:11]
+        
+        k_err = torch.norm(pred_pos - target_pos, dim=1, keepdim=True)
+        return energy_nn + (10.0 * k_err)
 
     def compute_vision_feature(self, img):
-        """Inference 최적화용: 이미지 특징만 추출"""
-        return self.encoder(img) # [B, 1024]
+        return self.encoder(img)
 
     def score_with_feature(self, vision_feature, action):
-        """Inference 최적화용: 특징+액션 -> 에너지 점수 (Pure Neural Energy)"""
         x = torch.cat([vision_feature, action], dim=1)
-        return self.energy_net(x)
+        energy_nn = self.energy_net(x)
+        
+        # Inference에서도 DFK Error를 더해서 물리적 일관성 유도
+        raw_actions = self.denormalize(action)
+        joints_rad = raw_actions[:, :6] * (torch.pi / 180.0)
+        pred_pos = self.dfk(joints_rad)
+        target_pos = raw_actions[:, 8:11]
+        
+        k_err = torch.norm(pred_pos - target_pos, dim=1, keepdim=True)
+        return energy_nn + (10.0 * k_err)
 
     def denormalize(self, norm_action):
-        """[-1, 1] -> [Min, Max]"""
         return (norm_action + 1) / 2 * (self.action_max - self.action_min) + self.action_min

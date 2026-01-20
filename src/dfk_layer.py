@@ -76,25 +76,6 @@ class DifferentiableFK(nn.Module):
         # 4. 위치(Translation) 추출
         m = tg.get_matrix()
         predicted_ee_pos = m[:, :3, 3]
-
-        # =================================================================
-        # [수정] 좌표계 보정 (Offset Correction)
-        # -----------------------------------------------------------------
-        # 문제: 로봇의 팔은 바닥(0,0,0)이 아니라 몸통 위(약 75cm 높이)에 달려 있습니다.
-        #       DFK가 어깨를 (0,0,0)으로 계산하고 있다면, 실제 정답(몸통 기준)과
-        #       수십 cm의 오차가 발생합니다. 이를 URDF 값으로 보정합니다.
-        #
-        # 출처: complete.urdf (joint: l_shoulder_z)
-        # <origin xyz="0.026783 0.049488 0.748809" ... />
-        # =================================================================
-        
-        # URDF에서 가져온 Torso -> Left Shoulder 오프셋 (x, y, z)
-        # (주의: 만약 self.chain을 'torso:11'부터 생성했다면 이 과정이 중복일 수 있으나,
-        #  현재 오차가 큰 상황에서는 이 오프셋이 빠져 있을 확률이 99%입니다.)
-        base_offset = torch.tensor([0.026783, 0.049488, 0.748809], device=self.device)
-        
-        # 최종 위치 = 어깨 기준 위치 + 오프셋
-        predicted_ee_pos = predicted_ee_pos + base_offset
         
         return predicted_ee_pos
 

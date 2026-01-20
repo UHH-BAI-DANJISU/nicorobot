@@ -24,7 +24,7 @@ def predict_action_cem(
     image,
     device,
     num_samples=2048,
-    num_iterations=5,
+    num_iterations=10,
     num_elites=64,
     action_dim=14
 ):
