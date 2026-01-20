@@ -14,20 +14,18 @@ from torch.utils.tensorboard import SummaryWriter
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-# (1) dataset.py에서 클래스와 함수 Import
 try:
     from dataset import NICORobotDataset, get_normalization_stats
 except ImportError:
     raise ImportError("'dataset.py' 파일이 src 폴더 내에 있어야 합니다.")
 
-# (2) Shared Architecture Import
 try:
     from model_architecture import VisionEncoder
 except ImportError:
     raise ImportError("'model_architecture.py' 파일을 src 폴더에 생성해주세요.")
 
 # ---------------------------------------------------------
-# 1. Kinematics Wrapper (Consistent Action Space)
+# 1. Kinematics Wrapper
 # ---------------------------------------------------------
 class NICOArmKinematics:
     def __init__(self, urdf_path, device='cpu'):
@@ -36,21 +34,15 @@ class NICOArmKinematics:
         if not os.path.exists(urdf_path):
             raise FileNotFoundError(f"URDF 파일을 찾을 수 없습니다: {urdf_path}")
 
-        # URDF 로드: Torso -> Left Palm 체인 구성
         self.chain = pk.build_serial_chain_from_urdf(
             open(urdf_path).read(), 
             end_link_name="left_palm:11"
         ).to(device=device)
         
-        # URDF Joint Limits (Arm 6 joints only)
-        # l_shoulder_z, l_shoulder_y, l_arm_x, l_elbow_y, l_wrist_z, l_wrist_x
         self.arm_limits_min = torch.tensor([-2.182, -3.124, -1.8675, -1.745, -1.571, -0.872], device=device)
         self.arm_limits_max = torch.tensor([ 1.745,  3.142,  3.002,   1.745,  1.571,  0.0   ], device=device)
 
     def forward_kinematics(self, arm_joint_angles):
-        """
-        Arm Joint Angles (Batch, 6) -> Cartesian Pose (Batch, 6: x,y,z, ex,ey,ez)
-        """
         tg = self.chain.forward_kinematics(arm_joint_angles)
         pos = tg.get_matrix()[:, :3, 3]
         rot_mat = tg.get_matrix()[:, :3, :3]
@@ -58,32 +50,27 @@ class NICOArmKinematics:
         return torch.cat([pos, euler], dim=1)
 
 # ---------------------------------------------------------
-# 2. Energy Model (Implicit Policy)
+# 2. Energy Model (Optimized for Memory)
 # ---------------------------------------------------------
 class EnergyModel(nn.Module):
-    def __init__(self, action_dim=14): # 8 Joint + 6 Cartesian = 14
+    def __init__(self, action_dim=14):
         super().__init__()
-        # Shared Vision Encoder (ResNet18 base)
         self.encoder = VisionEncoder() 
         
-        # [중요 수정] 데이터셋이 Left+Right 이미지를 합쳐서 (6, 64, 64)를 줍니다.
+        # 6-channel input modification
         original_conv = self.encoder.features[0]
         self.encoder.features[0] = nn.Conv2d(
-            in_channels=6, # 3 -> 6 변경 (Stereo Input)
+            in_channels=6,
             out_channels=original_conv.out_channels,
             kernel_size=original_conv.kernel_size,
             stride=original_conv.stride,
             padding=original_conv.padding,
             bias=original_conv.bias
         )
-        
-        # 초기화 (새로 만든 레이어 가중치 초기화)
         nn.init.kaiming_normal_(self.encoder.features[0].weight, mode='fan_out', nonlinearity='relu')
 
-        # Vision Feature(1024) + Action(14)
         input_dim = self.encoder.output_dim + action_dim
         
-        # Energy Function (MLP)
         self.energy_net = nn.Sequential(
             nn.Linear(input_dim, 256),
             nn.ReLU(),
@@ -91,22 +78,29 @@ class EnergyModel(nn.Module):
             nn.ReLU(),
             nn.Linear(256, 256),
             nn.ReLU(),
-            nn.Linear(256, 1) # Scalar Energy Output
+            nn.Linear(256, 1)
         )
-        
+    
+    # [최적화 1] Vision Feature만 따로 계산하는 함수
+    def compute_vision_feature(self, img):
+        return self.encoder(img) # [Batch, 1024]
+
+    # [최적화 2] 미리 계산된 Feature와 Action으로 Energy 계산
+    def score_with_feature(self, vision_feature, action):
+        # vision_feature: [Batch, 1024]
+        # action: [Batch, 14]
+        x = torch.cat([vision_feature, action], dim=1)
+        return self.energy_net(x)
+
     def forward(self, img, action):
-        # img: [B, 6, 64, 64]
-        # action: [B, 14]
-        visual_emb = self.encoder(img) # [B, 1024]
-        x = torch.cat([visual_emb, action], dim=1)
-        energy = self.energy_net(x)    # [B, 1]
-        return energy
+        # 기존 방식 (Inference용)
+        visual_emb = self.compute_vision_feature(img)
+        return self.score_with_feature(visual_emb, action)
 
 # ---------------------------------------------------------
 # 3. Main Training Loop
 # ---------------------------------------------------------
 def main():
-    # ---------------- Setup ----------------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Info] Device: {device}")
 
@@ -116,15 +110,15 @@ def main():
     TEST_DIR = os.path.join(BASE_DIR, 'real_evo_ik_samples_test')
     URDF_PATH = os.path.join(os.path.dirname(current_dir), 'complete.urdf')
 
-    # Hyperparameters
-    BATCH_SIZE = 256
+    # [메모리 절약을 위해 배치 사이즈 축소]
+    # CPU에서는 256도 부담될 수 있으니 64로 줄임
+    BATCH_SIZE = 64 
     LR = 1e-4
     EPOCHS = 100
     NUM_NEGATIVES = 64 
 
     # ---------------- Data Loading ----------------
     train_csv = os.path.join(TRAIN_DIR, 'samples.csv')
-    
     if not os.path.exists(train_csv):
         print(f"[Error] 학습 데이터 CSV가 없습니다: {train_csv}")
         return
@@ -134,8 +128,9 @@ def main():
     train_ds = NICORobotDataset(TRAIN_DIR, stats, is_train=True)
     test_ds = NICORobotDataset(TEST_DIR, stats, is_train=False)
     
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
-    test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
+    # CPU 과부하 방지를 위해 num_workers도 줄임 (4 -> 2)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
+    test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
     
     print(f"[Info] Training Samples: {len(train_ds)}")
     print(f"[Info] Testing Samples: {len(test_ds)}")
@@ -147,20 +142,16 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=LR)
     writer = SummaryWriter("runs/implicit_bc_experiment")
 
-    # Normalization Tensor (GPU)
     stats_min = torch.tensor(stats['min'], device=device, dtype=torch.float32)
     stats_max = torch.tensor(stats['max'], device=device, dtype=torch.float32)
     stats_scale = (stats_max - stats_min) + 1e-6
 
     # ---------------- Training ----------------
-    print("[Info] Start Training...")
+    print("[Info] Start Training (Memory Optimized)...")
     global_step = 0
-    best_val_loss = float('inf') # 최고 기록 추적용
+    best_val_loss = float('inf')
 
     for epoch in range(EPOCHS):
-        # ==========================
-        # 1. Training Phase
-        # ==========================
         model.train()
         train_loss_sum = 0
         
@@ -170,15 +161,18 @@ def main():
             
             curr_batch_size = images.shape[0]
 
-            # Positive Energy
-            pos_energy = model(images, pos_actions) 
+            # [최적화 핵심] 이미지는 딱 한 번만 인코딩! (ResNet 1회 실행)
+            vision_features = model.compute_vision_feature(images) # [B, 1024]
 
-            # Negative Sampling (Kinematic Consistency)
-            # A. Arm Joints (6 dims)
+            # 1. Positive Energy
+            pos_energy = model.score_with_feature(vision_features, pos_actions)
+
+            # 2. Negative Sampling
+            # A. Arm Joints
             rand_arm = torch.rand(curr_batch_size * NUM_NEGATIVES, 6, device=device)
             rand_arm = rand_arm * (kinematics.arm_limits_max - kinematics.arm_limits_min) + kinematics.arm_limits_min
             
-            # B. Head Joints (2 dims)
+            # B. Head Joints
             head_min = stats_min[6:8]
             head_max = stats_max[6:8]
             rand_head = torch.rand(curr_batch_size * NUM_NEGATIVES, 2, device=device)
@@ -189,16 +183,19 @@ def main():
             with torch.no_grad():
                 rand_cart_raw = kinematics.forward_kinematics(rand_arm) 
 
-            # D. Full Action & Normalize
+            # D. Normalize
             neg_actions_raw = torch.cat([rand_joints_raw, rand_cart_raw], dim=1)
             neg_actions = 2 * (neg_actions_raw - stats_min) / stats_scale - 1.0
             
-            # Negative Energy
-            images_expanded = images.repeat_interleave(NUM_NEGATIVES, dim=0) 
-            neg_energy = model(images_expanded, neg_actions) 
+            # [최적화 핵심] Feature 벡터만 복사해서 사용 (이미지 복사 X)
+            # [B, 1024] -> [B * N, 1024]
+            vision_features_expanded = vision_features.repeat_interleave(NUM_NEGATIVES, dim=0)
+            
+            # MLP만 통과 (가벼움)
+            neg_energy = model.score_with_feature(vision_features_expanded, neg_actions)
             neg_energy = neg_energy.view(curr_batch_size, NUM_NEGATIVES) 
 
-            # InfoNCE Loss
+            # 3. Loss
             logits = torch.cat([-pos_energy, -neg_energy], dim=1)
             labels = torch.zeros(curr_batch_size, dtype=torch.long, device=device)
             
@@ -216,9 +213,7 @@ def main():
 
         avg_train_loss = train_loss_sum / len(train_loader)
         
-        # ==========================
-        # 2. Validation Phase
-        # ==========================
+        # --- Validation ---
         model.eval()
         val_loss_sum = 0
         
@@ -228,10 +223,11 @@ def main():
                 pos_actions = batch['action'].to(device)
                 curr_batch_size = images.shape[0]
 
-                # Validation에서도 InfoNCE Loss를 측정하여 모델의 변별력 평가
-                pos_energy = model(images, pos_actions)
+                # Validation도 최적화된 방식으로 실행
+                vision_features = model.compute_vision_feature(images)
+                pos_energy = model.score_with_feature(vision_features, pos_actions)
 
-                # Validation용 Negative Sampling (Train과 동일 로직)
+                # Negative Sampling
                 rand_arm = torch.rand(curr_batch_size * NUM_NEGATIVES, 6, device=device)
                 rand_arm = rand_arm * (kinematics.arm_limits_max - kinematics.arm_limits_min) + kinematics.arm_limits_min
                 
@@ -245,8 +241,8 @@ def main():
                 neg_actions_raw = torch.cat([rand_joints_raw, rand_cart_raw], dim=1)
                 neg_actions = 2 * (neg_actions_raw - stats_min) / stats_scale - 1.0
                 
-                images_expanded = images.repeat_interleave(NUM_NEGATIVES, dim=0)
-                neg_energy = model(images_expanded, neg_actions)
+                vision_features_expanded = vision_features.repeat_interleave(NUM_NEGATIVES, dim=0)
+                neg_energy = model.score_with_feature(vision_features_expanded, neg_actions)
                 neg_energy = neg_energy.view(curr_batch_size, NUM_NEGATIVES)
 
                 logits = torch.cat([-pos_energy, -neg_energy], dim=1)
@@ -257,23 +253,16 @@ def main():
 
         avg_val_loss = val_loss_sum / len(test_loader)
         
-        # Logging
         print(f"Epoch [{epoch+1}/{EPOCHS}] | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
         writer.add_scalar("Loss/train_epoch", avg_train_loss, epoch)
         writer.add_scalar("Loss/val_epoch", avg_val_loss, epoch)
 
-        # ==========================
-        # 3. Model Saving
-        # ==========================
-        
-        # (1) Best Model: Validation Loss가 가장 낮을 때 저장
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             save_path = os.path.join(current_dir, "best_implicit_model.pth")
             torch.save(model.state_dict(), save_path)
             print(f"  >>> Best model saved! (Val Loss: {best_val_loss:.4f})")
 
-        # (2) Latest Checkpoint: 중단 시 재개를 위해 매 에폭마다 저장
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
