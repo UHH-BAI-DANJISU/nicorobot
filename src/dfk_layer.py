@@ -4,12 +4,6 @@ import pytorch_kinematics as pk
 import os
 
 class DifferentiableFK(nn.Module):
-    import torch
-import torch.nn as nn
-import pytorch_kinematics as pk
-import os
-
-class DifferentiableFK(nn.Module):
     def __init__(self, device='cpu', urdf_path='complete.urdf', end_link_name='left_palm:11'):
         super().__init__()
         self.device = device
@@ -31,19 +25,23 @@ class DifferentiableFK(nn.Module):
             end_link_name=end_link_name
         ).to(device=device)
         
-        # 관절 매핑 (왼팔 6개)
+        # 관절 매핑
         self.input_joint_names = [
             'l_shoulder_z', 'l_shoulder_y', 'l_arm_x', 
             'l_elbow_y', 'l_wrist_z', 'l_wrist_x'
         ]
         self.chain_joint_names = self.chain.get_joint_parameter_names()
         self.perm_indices = [self.input_joint_names.index(name) for name in self.chain_joint_names if name in self.input_joint_names]
+        
+        # [수정] 진단 스크립트로 찾아낸 오프셋 보정값 (GT - DFK)
+        # 이 값을 더해주어야 DFK 결과가 실제 정답 위치와 일치하게 됨
+        self.register_buffer('tcp_offset', torch.tensor([-0.02256, -0.02931, -0.02383], device=device))
 
     def forward(self, joint_angles):
         if joint_angles.device != torch.device(self.device):
             joint_angles = joint_angles.to(self.device)
             
-        # 1. 왼팔 6개 관절만 사용
+        # 1. 관절값 추출
         arm_joints = joint_angles[:, :6] 
 
         # 2. 순서 재정렬
@@ -56,19 +54,6 @@ class DifferentiableFK(nn.Module):
         tg = self.chain.forward_kinematics(ordered_joints)
         predicted_ee_pos = tg.get_matrix()[:, :3, 3]
 
-        # [수정] 중복 오프셋 삭제됨!
-        # pytorch_kinematics가 이미 URDF의 origin을 처리합니다.
-        
-        return predicted_ee_pos
-
-if __name__ == "__main__":
-    # 테스트 코드
-    try:
-        dfk = DifferentiableFK(device='cpu', urdf_path='complete.urdf')
-        dummy_input = torch.zeros(2, 8) # Batch 2
-        pos = dfk(dummy_input)
-        print("Output shape:", pos.shape)
-        print("Position (Left Palm):", pos)
-    except Exception as e:
-        print(f"Test Failed: {e}")
-        print("Make sure 'complete.urdf' is in the current or parent directory.")
+        # 4. [핵심 수정] 오프셋 보정 적용
+        # DFK(Palm) 위치에 보정값을 더해 GT(Hand) 위치로 변환
+        return predicted_ee_pos + self.tcp_offset

@@ -13,7 +13,7 @@ class EnergyModel(nn.Module):
     def __init__(self, action_dim=14, stats=None, device='cpu'):
         super().__init__()
         
-        # 1. Vision Encoder (Spatial Softmax)
+        # 1. Vision Encoder
         self.encoder = VisionEncoder()
         
         # 6채널 입력 (Stereo)
@@ -56,14 +56,13 @@ class EnergyModel(nn.Module):
         energy_nn = self.energy_net(x)
         
         # [수정] Training 중 DFK Loss 계산
-        # 1. Denormalize
         raw_actions = self.denormalize(action)
         
-        # 2. Joint Angles (이미 Radian이라고 가정!)
-        # 변환 코드 삭제함: joints_rad = joints_deg * ... (삭제)
-        joints_rad = raw_actions[:, :6] 
+        # >>> [핵심 복구] 데이터가 Degree이므로 Radian으로 변환 필수! <<<
+        joints_deg = raw_actions[:, :6] 
+        joints_rad = joints_deg * (torch.pi / 180.0)
         
-        # 3. DFK & Error
+        # DFK (이제 오프셋 보정됨) & Error
         pred_pos = self.dfk(joints_rad)
         target_pos = raw_actions[:, 8:11]
         
@@ -79,7 +78,10 @@ class EnergyModel(nn.Module):
         
         # [수정] Inference 중 DFK Consistency Check
         raw_actions = self.denormalize(action)
-        joints_rad = raw_actions[:, :6] # 이미 Radian
+        
+        # >>> [핵심 복구] Inference에서도 변환 필수! <<<
+        joints_deg = raw_actions[:, :6]
+        joints_rad = joints_deg * (torch.pi / 180.0)
         
         pred_pos = self.dfk(joints_rad)
         target_pos = raw_actions[:, 8:11]
