@@ -206,7 +206,7 @@ def main():
         dfk_layer=dfk_layer,
         test_dataset=test_ds,
         device=device,
-        num_samples=100 
+        num_samples=200 
     )
 
 if __name__ == "__main__":
