@@ -188,7 +188,7 @@ def main():
     model = EnergyModel(action_dim=14, stats=stats, device=device).to(device)
     
     # Init DFK (for Kinematic Error calculation during inference)
-    # URDF 파일은 src 폴더 내 complete.urdf를 찾음
+    # The URDF file is located in the src folder as complete.urdf
     dfk_layer = DifferentiableFK(device=device, urdf_path='complete.urdf')
 
     # Load Weights

@@ -33,7 +33,7 @@ class VisionEncoder(nn.Module):
     def __init__(self):
         super().__init__()
         resnet = resnet18(pretrained=True)
-        # Layer4까지만 사용 (Spatial Softmax를 위해)
+        # Use up to layer4 only (for Spatial Softmax)
         self.features = nn.Sequential(
             resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool,
             resnet.layer1, resnet.layer2, resnet.layer3, resnet.layer4

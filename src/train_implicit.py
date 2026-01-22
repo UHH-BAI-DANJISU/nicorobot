@@ -118,7 +118,7 @@ def main():
     # ---------------- Data Loading ----------------
     train_csv = os.path.join(TRAIN_DIR, 'samples.csv')
     if not os.path.exists(train_csv):
-        print(f"[Error] 학습 데이터 CSV가 없습니다: {train_csv}")
+        print(f"[Error] Training data CSV not found: {train_csv}")
         return
         
     stats = get_normalization_stats(train_csv) 
@@ -188,7 +188,7 @@ def main():
             # [B, 1024] -> [B * N, 1024]
             vision_features_expanded = vision_features.repeat_interleave(NUM_NEGATIVES, dim=0)
             
-            # MLP만 통과 (가벼움)
+            # Only pass through the MLP (lightweight operation)
             neg_energy = model.score_with_feature(vision_features_expanded, neg_actions)
             neg_energy = neg_energy.view(curr_batch_size, NUM_NEGATIVES) 
 
@@ -220,7 +220,6 @@ def main():
                 pos_actions = batch['action'].to(device)
                 curr_batch_size = images.shape[0]
 
-                # Validation도 최적화된 방식으로 실행
                 vision_features = model.compute_vision_feature(images)
                 pos_energy = model.score_with_feature(vision_features, pos_actions)
 
