@@ -112,7 +112,7 @@ def main():
     # Training Hyperparameters
     BATCH_SIZE = 64 
     LR = 1e-4
-    EPOCHS = 100
+    EPOCHS = 30
     NUM_NEGATIVES = 64 # Number of negative samples per positive sample
 
     # ---------------- Data Loading ----------------
